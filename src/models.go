@@ -2,7 +2,12 @@
 // Unlike the Python version, the types are shared between API and internal code, since we can just define the JSON serialization in tags.
 package main
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"errors"
+	"slices"
+	"strings"
+)
 
 // GameState represents the current state of the game.
 type GameState int
@@ -119,7 +124,7 @@ type FirstBlood struct {
 	// Name is the name of the team that achieved the first blood.
 	Name *string `json:"name,omitempty"`
 	// Ts is the Unix timestamp when the first blood was achieved.
-	Ts *int64 `json:"ts,omitempty"`
+	Ts *float64 `json:"ts,omitempty"`
 
 	// Confirmed is true if the first blood is considered valid (if relevant for game definition).
 	Confirmed *bool `json:"confirmed,omitempty"`
@@ -192,6 +197,52 @@ type ScoreboardTeamHistory struct {
 	Points [][]float32 `json:"points"`
 }
 
+func (sth *ScoreboardTeamHistory) GetTotalPoints() []float32 {
+	if len(sth.Points) == 0 {
+		return nil
+	}
+
+	numRounds := len(sth.Points[0])
+	totalPoints := make([]float32, numRounds)
+
+	for _, servicePoints := range sth.Points {
+		for roundIndex, points := range servicePoints {
+			totalPoints[roundIndex] += points
+		}
+	}
+
+	return totalPoints
+}
+
+type booleanField struct {
+	Value   *string
+	Defined bool
+}
+
+func (bf *booleanField) UnmarshalJSON(data []byte) error {
+	if string(data) == "false" {
+		bf.Value = nil
+		bf.Defined = false
+		return nil
+	}
+
+	var strValue string
+	if err := json.Unmarshal(data, &strValue); err != nil {
+		return err
+	}
+	bf.Value = &strValue
+	bf.Defined = true
+	return nil
+}
+
+func (bf booleanField) MarshalJSON() ([]byte, error) {
+	if !bf.Defined {
+		return []byte("false"), nil
+	}
+
+	return json.Marshal(bf.Value)
+}
+
 // StaticTeamInfo is the static information about one team.
 type StaticTeamInfo struct {
 	// Name is the name of the team.
@@ -205,15 +256,12 @@ type StaticTeamInfo struct {
 	// Logo is the filename of the team's logo image, without path or url.
 	// Usually you can fetch it from /logos/<filename> (NOT /api/logos/...).
 	// If the logo is not set, this might be the filename of a placeholder image, or false.
-	Logo *string `json:"logo,omitempty"`
+	Logo booleanField `json:"logo"`
 }
 
 // ScoreboardTeams is the information about all teams, indexed by team ID.
 // API result for /api/scoreboard_teams.json
-type ScoreboardTeams struct {
-	// Root is the root object, mapping team IDs to StaticTeamInfo.
-	Root map[string]StaticTeamInfo `json:"root"`
-}
+type ScoreboardTeams map[string]StaticTeamInfo
 
 // ServiceAttackerVictimCount is the number of attackers/victims in one round and service.
 type ServiceAttackerVictimCount struct {
@@ -254,11 +302,61 @@ type AttackInfo struct {
 	// Only services that publish attack info are listed.
 	// Rounds range over the still-valid ones, excluding the current round -
 	// its attack info is published once the round is over.
-	AttackInfo map[string]map[string]map[string]*string `json:"attack_info"`
+	AttackInfo map[string]map[string]map[string]map[string]*string `json:"attack_info"`
 	// CurrentRound is the round number we're currently playing (if live), 0 before the game, last played round after the game.
 	CurrentRound int `json:"current_round"`
 	// CurrentRoundStart is the Unix timestamp when the current round started.
 	CurrentRoundStart *int64 `json:"current_round_start,omitempty"`
 	// CurrentRoundUntil is the Unix timestamp when the current round will end.
 	CurrentRoundUntil *int64 `json:"current_round_until,omitempty"`
+}
+
+func flattenMap(m map[string]*string) []string {
+	result := make([]string, 0, len(m))
+	for _, v := range m {
+		if v != nil {
+			result = append(result, *v)
+		}
+	}
+
+	return result
+}
+
+func flattenNestedMap(m map[string]map[string]*string) []string {
+	result := make([]string, 0)
+	for _, innerMap := range m {
+		result = append(result, flattenMap(innerMap)...)
+	}
+
+	return result
+}
+
+// GetFlagIDs retrieves the flag IDs for a given service, team, and optional round from the AttackInfo structure.
+func (ai *AttackInfo) GetFlagIDs(serviceName string, teamName string, round *string) ([]string, error) {
+	teamIndex := slices.IndexFunc(ai.Teams, func(t AttackInfoTeam) bool { return strings.EqualFold(t.Name, teamName) })
+	if teamIndex == -1 {
+		return nil, errors.New("team not found")
+	}
+
+	teamIP := ai.Teams[teamIndex].IP
+
+	serviceInfo, ok := ai.AttackInfo[serviceName]
+	if !ok {
+		return nil, errors.New("service not found")
+	}
+
+	teamAttackInfo, ok := serviceInfo[teamIP]
+	if !ok {
+		return nil, errors.New("team attack info not found for the given service")
+	}
+
+	if round != nil {
+		roundInfo, ok := teamAttackInfo[*round]
+		if !ok {
+			return nil, errors.New("round not found for the given service and team")
+		}
+		return flattenMap(roundInfo), nil
+	}
+
+	return flattenNestedMap(teamAttackInfo), nil
 }

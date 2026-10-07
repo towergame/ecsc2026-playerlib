@@ -1,15 +1,12 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
-
-	"github.com/gofrs/flock"
 )
 
 // CacheEntry represents a single cache entry with its data and timestamp.
@@ -84,27 +81,11 @@ func (mc *MemoryCache) Clear() {
 // FileCache is a file-based cache.
 type FileCache struct {
 	path string
-	lock *flock.Flock
-}
-
-func acquireLock(ctx context.Context, path string) (*flock.Flock, error) {
-	lock := flock.New(path)
-
-	locked, err := lock.TryLockContext(ctx, 10*time.Millisecond)
-	if err != nil {
-		return nil, err
-	}
-	if !locked {
-		return nil, context.DeadlineExceeded
-	}
-
-	return lock, nil
 }
 
 func NewFileCache(path string) *FileCache {
 	return &FileCache{
 		path: path,
-		lock: flock.New(path),
 	}
 }
 

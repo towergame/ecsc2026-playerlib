@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/open-policy-agent/opa/server/identifier"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -24,7 +23,7 @@ func assumeScheme(url string) string {
 		return url
 	}
 
-	return "https://" + url
+	return "http://" + url
 }
 
 func normalizeBaseURL(base_url string) string {
@@ -32,6 +31,7 @@ func normalizeBaseURL(base_url string) string {
 	if strings.HasSuffix(base_url, ".json") {
 		split := strings.Split(base_url, "/")
 		base_url = strings.Join(split[:len(split)-1], "/")
+		return base_url + "/"
 	}
 	if !strings.HasSuffix(base_url, "/") {
 		base_url += "/"
@@ -65,7 +65,9 @@ type ECSCApi struct {
 	singleFlight singleflight.Group
 }
 
-func NewECSCApi(baseURL *string, cacheDir *string, lifetime *time.Duration, timeout *time.Duration) *ECSCApi {
+var memoryCache = NewMemoryCache(30 * time.Second)
+
+func NewECSCApi(baseURL *string, cacheDir *string, lifetime *time.Duration, timeout *time.Duration, sharedCache bool) (*ECSCApi, error) {
 	if baseURL == nil {
 		envBaseURL := os.Getenv(ENV_VAR)
 		if envBaseURL == "" {
@@ -82,13 +84,29 @@ func NewECSCApi(baseURL *string, cacheDir *string, lifetime *time.Duration, time
 	}
 
 	if lifetime == nil {
-		defaultLifetime := 60 * time.Second
+		defaultLifetime := 30 * time.Second
 		lifetime = &defaultLifetime
+	}
+
+	if *lifetime < 1*time.Second {
+		return nil, fmt.Errorf("lifetime must be at least 1 second")
 	}
 
 	if timeout == nil {
 		defaultTimeout := 10 * time.Second
 		timeout = &defaultTimeout
+	}
+
+	if *lifetime < *timeout {
+		return nil, fmt.Errorf("lifetime must be greater than or equal to timeout")
+	}
+
+	var usedCache *MemoryCache
+	if sharedCache {
+		// This does mean lifetime is ignored, but who cares ngl
+		usedCache = memoryCache
+	} else {
+		usedCache = NewMemoryCache(*lifetime)
 	}
 
 	return &ECSCApi{
@@ -98,9 +116,9 @@ func NewECSCApi(baseURL *string, cacheDir *string, lifetime *time.Duration, time
 		timeout:      *timeout,
 		UserAgent:    fmt.Sprintf("go/ecsc2026ad %s", version()),
 		httpClient:   &http.Client{},
-		memoryCache:  NewMemoryCache(*lifetime * time.Second),
+		memoryCache:  usedCache,
 		singleFlight: singleflight.Group{},
-	}
+	}, nil
 }
 
 // get is a generic function that performs a GET request against a given endpoint and decodes the JSON into struct T.
@@ -174,16 +192,30 @@ func get[T any](ctx context.Context, api *ECSCApi, path string) (*T, error) {
 
 // GetAttackInfo gets attack info (teams, services, flag IDs) from `attack.json`
 func (api *ECSCApi) GetAttackInfo(ctx context.Context) (*AttackInfo, error) {
-	return api.singleFlight.Do("attack_info", func() (interface{}, error) {
+	result, err, _ := api.singleFlight.Do("attack_info", func() (any, error) {
 		return get[AttackInfo](ctx, api, "attack.json")
 	})
+
+	if result != nil {
+		if typedResult, ok := result.(*AttackInfo); ok {
+			return typedResult, err
+		}
+	}
+	return nil, err
 }
 
 // GetGameState gets current game state (round, running/stopped, freeze) from `scoreboard_current.json`
 func (api *ECSCApi) GetGameState(ctx context.Context) (*ScoreboardCurrent, error) {
-	return api.singleFlight.Do("game_state", func() (interface{}, error) {
+	result, err, _ := api.singleFlight.Do("game_state", func() (any, error) {
 		return get[ScoreboardCurrent](ctx, api, "scoreboard_current.json")
 	})
+
+	if result != nil {
+		if typedResult, ok := result.(*ScoreboardCurrent); ok {
+			return typedResult, err
+		}
+	}
+	return nil, err
 }
 
 // GetScoreboard gets the scoreboard from `scoreboard_round_$round.json` for the given round.
@@ -197,29 +229,59 @@ func (api *ECSCApi) GetScoreboard(ctx context.Context, round *int) (*ScoreboardR
 		round = &gameState.ScoreboardRound
 	}
 	identifier := fmt.Sprintf("scoreboard_round_%d", *round)
-	return api.singleFlight.Do(identifier, func() (interface{}, error) {
+
+	result, err, _ := api.singleFlight.Do(identifier, func() (any, error) {
 		return get[ScoreboardRound](ctx, api, fmt.Sprintf("scoreboard_round_%d.json", *round))
 	})
+
+	if result != nil {
+		if scoreboardRound, ok := result.(*ScoreboardRound); ok {
+			return scoreboardRound, err
+		}
+	}
+	return nil, err
 }
 
 // GetScoreboardTeams gets the scoreboard team metadata from `scoreboard_teams.json`
 func (api *ECSCApi) GetScoreboardTeams(ctx context.Context) (*ScoreboardTeams, error) {
-	return api.singleFlight.Do("scoreboard_teams", func() (interface{}, error) {
+	result, err, _ := api.singleFlight.Do("scoreboard_teams", func() (any, error) {
 		return get[ScoreboardTeams](ctx, api, "scoreboard_teams.json")
 	})
+
+	if result != nil {
+		if typedResult, ok := result.(*ScoreboardTeams); ok {
+			return typedResult, err
+		}
+	}
+	return nil, err
 }
 
 // GetTeamHistory gets the team history from `team_history.json`
 func (api *ECSCApi) GetTeamHistory(ctx context.Context, team_id int) (*ScoreboardTeamHistory, error) {
 	identifier := fmt.Sprintf("scoreboard_team_%d", team_id)
-	return api.singleFlight.Do(identifier, func() (interface{}, error) {
+
+	result, err, _ := api.singleFlight.Do(identifier, func() (any, error) {
 		return get[ScoreboardTeamHistory](ctx, api, fmt.Sprintf("scoreboard_team_%d.json", team_id))
 	})
+
+	if result != nil {
+		if typedResult, ok := result.(*ScoreboardTeamHistory); ok {
+			return typedResult, err
+		}
+	}
+	return nil, err
 }
 
 // GetServiceStats gets the attacker/victim counts over time from `scoreboard_service_stats.json`
 func (api *ECSCApi) GetServiceStats(ctx context.Context) (*ScoreboardServiceStats, error) {
-	return api.singleFlight.Do("scoreboard_service_stats", func() (interface{}, error) {
+	result, err, _ := api.singleFlight.Do("scoreboard_service_stats", func() (any, error) {
 		return get[ScoreboardServiceStats](ctx, api, "scoreboard_service_stats.json")
 	})
+
+	if result != nil {
+		if typedResult, ok := result.(*ScoreboardServiceStats); ok {
+			return typedResult, err
+		}
+	}
+	return nil, err
 }
