@@ -1,6 +1,6 @@
 // This file contains the data models for the API responses of the scoreboard.
 // Unlike the Python version, the types are shared between API and internal code, since we can just define the JSON serialization in tags.
-package main
+package playerlib
 
 import (
 	"encoding/json"

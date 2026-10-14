@@ -1,6 +1,6 @@
 // This file contains the ECSC2026 API client.
 // It provides functions to interact with the ECSC2026 API, alongside caching in memory+disk.
-package main
+package playerlib
 
 import (
 	"context"

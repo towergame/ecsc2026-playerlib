@@ -1,4 +1,4 @@
-package main
+package playerlib
 
 import (
 	"encoding/json"
